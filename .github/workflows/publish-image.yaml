@@ -1,0 +1,86 @@
+name: "Publish container images"
+on:
+  workflow_dispatch:
+  workflow_call: # Workflow is meant to be called from another workflow, with the image tag as input
+    inputs:
+      image-tags:
+        description: "Which tag to give the images. Supports multiple tags if comma separated, ie 'tag1,tag2'"
+        required: true
+        type: string
+      oauth-redirect-url:
+        description: "Redirect url for oauth. Should be the public url to access the web app"
+        default: "https://template-fastapi-react.app.playground.radix.equinor.com"
+        required: true
+        type: string
+    secrets:
+      CR_SECRET:
+        description: "Secret to authenticate if using an other container registry than Github"
+        required: false
+
+env:
+  IMAGE_REGISTRY: ghcr.io
+  REGISTRY_USER: $GITHUB_ACTOR
+  API_IMAGE: ghcr.io/equinor/template-fastapi-react/api
+  NGINX_IMAGE: ghcr.io/equinor/template-fastapi-react/nginx
+
+jobs:
+  build-and-publish-nginx-main:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@master
+        with:
+          fetch-depth: 2
+
+      - name: "Login to image registry"
+        run: echo ${{ secrets.GITHUB_TOKEN }} | docker login $IMAGE_REGISTRY -u $GITHUB_ACTOR --password-stdin
+
+      - name: "Build web"
+        run: |
+          docker pull $NGINX_IMAGE
+          printf "$(git log -n 1 --format=format:'hash: %h%ndate: %cs%nrefs: %d' --decorate=short --decorate-refs=refs/tags | sed 's/ (tag: \([^\s]*\))/\1/')" > ./web/public/version.txt
+          docker build \
+          --build-arg REDIRECT_URI=${{inputs.oauth-redirect-url}} \
+          --build-arg AUTH_ENABLED=1 \
+          --build-arg AUTH_SCOPE=api://4a761bec-628d-4c4b-860a-4903cbecc963/api \
+          --build-arg CLIENT_ID=4a761bec-628d-4c4b-860a-4903cbecc963 \
+          --build-arg TENANT_ID=3aa4a235-b6e2-48d5-9195-7fcf05b459b0 \
+          --cache-from ${NGINX_IMAGE} \
+          --tag ${NGINX_IMAGE} \
+          --target nginx-prod \
+          ./web
+
+      - name: "Publish web"
+        run: |
+          IFS=','
+          for IMAGE_TAG in $(echo ${{ inputs.image-tags }})
+          do
+            echo "Tagging with $IMAGE_TAG"
+            docker tag $NGINX_IMAGE $NGINX_IMAGE:$IMAGE_TAG
+            docker push $NGINX_IMAGE:$IMAGE_TAG
+          done
+
+  build-and-publish-api-main:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@master
+        with:
+          fetch-depth: 2
+
+      - name: "Login to image registry"
+        run: echo ${{ secrets.GITHUB_TOKEN }} | docker login $IMAGE_REGISTRY -u $GITHUB_ACTOR --password-stdin
+
+      - name: "Build API"
+        run: |
+          docker pull $API_IMAGE
+          printf "$(git log -n 1 --format=format:'hash: %h%ndate: %cs%nrefs: %d' --decorate=short --decorate-refs=refs/tags | sed 's/ (tag: \([^\s]*\))/\1/')" > ./api/src/version.txt
+          docker build --cache-from $API_IMAGE --target prod --tag $API_IMAGE ./api
+
+      - name: "Publish API"
+        run: |
+          IFS=','
+          for IMAGE_TAG in $(echo ${{ inputs.image-tags }})
+          do
+            echo "Tagging with $IMAGE_TAG"
+            docker tag $API_IMAGE $API_IMAGE:$IMAGE_TAG
+            docker push $API_IMAGE:$IMAGE_TAG
+          done

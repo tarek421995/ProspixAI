@@ -1,0 +1,104 @@
+name: "Test"
+on:
+  # Workflow dispatch is used for manual triggers
+  workflow_dispatch:
+  # Workflow call is used for called from another workflow
+  workflow_call:
+    secrets:
+      CR_SECRET:
+        description: "Secret to authenticate if using an other container registry than Github"
+        required: false
+
+env:
+  IMAGE_REGISTRY: ghcr.io
+  REGISTRY_USER: $GITHUB_ACTOR
+  API_IMAGE: ghcr.io/equinor/template-fastapi-react/api
+  WEB_IMAGE: ghcr.io/equinor/template-fastapi-react/web
+
+jobs:
+  pre-commit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@master
+
+      - name: Set up python
+        uses: actions/setup-python@v2
+        with:
+          python-version: "3.10"
+
+      - name: Install pre-commit
+        run: pip install pre-commit
+
+      - name: Set up venv
+        run: |
+          pip install poetry
+          poetry config virtualenvs.in-project true
+          cd api
+          poetry install
+
+      - name: Run pre-commit
+        run: pre-commit run --all-files
+
+  test-api:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@master
+
+      - name: "Login to image registry"
+        run: echo ${{ secrets.GITHUB_TOKEN }} | docker login $IMAGE_REGISTRY -u $GITHUB_ACTOR --password-stdin
+
+      - name: Build API image
+        run: |
+          docker pull $API_IMAGE
+          docker build --target development --tag api-development ./api # TODO: --cache-from $API_IMAGE
+
+      - name: BDD Integration tests
+        if: ${{ false }} # disable for now
+        run: docker-compose -f docker-compose.yml -f docker-compose.ci.yml run api behave
+
+      - name: Pytest Integration tests
+        run: docker-compose -f docker-compose.yml -f docker-compose.ci.yml run --rm api pytest --integration
+
+  test-web:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@master
+
+      - name: "Login to image registry"
+        run: echo ${{ secrets.GITHUB_TOKEN }} | docker login $IMAGE_REGISTRY -u $GITHUB_ACTOR --password-stdin
+
+      - name: Build Web Image
+        run: |
+          docker pull $WEB_IMAGE
+          docker build --cache-from $WEB_IMAGE --target development --tag web-dev ./web
+
+  test-docs:
+    name: test-docs
+    runs-on: ubuntu-latest
+
+    steps:
+      # If you know your docs does not rely on anything outside of the documentation folder, the commented out code below can be used to only test the docs build if the documentation folder changes.
+      - name: "Checkout GitHub Action"
+        uses: actions/checkout@main
+        # with:
+        #   fetch-depth: 0
+
+      # - name: "Get number of changed documentation files"
+      #   id: docs-changes
+      #   shell: bash
+      #   run: echo "changes=$(git diff --name-only $(git merge-base HEAD origin/main) HEAD | grep documentation/ | wc -l)" >> $GITHUB_OUTPUT
+
+      - name: "Setup node"
+        # if: steps.docs-changes.outputs.changes > 0
+        uses: actions/setup-node@v3
+        with:
+          node-version: 18
+          cache: yarn
+          cache-dependency-path: documentation/yarn.lock
+
+      - name: Install dependencies and build website
+        # if: steps.docs-changes.outputs.changes > 0
+        run: |
+          cd documentation
+          yarn install --frozen-lockfile
+          yarn build
